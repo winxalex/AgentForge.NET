@@ -1,0 +1,30 @@
+@using Chat2Report.Models
+@using Chat2Report.Services.Chart
+@inject IChartRenderingService ChartRenderingService
+@inject ILogger<ChartRenderer> Logger
+
+<div id="@ContainerId" class="chart-container mb-2" style="width: 100%;min-width: 800px;min-height: 600px; overflow: auto; background-color: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px;"></div>
+
+@code {
+    [Parameter, EditorRequired]
+    public required ChartContent ChartContent { get; set; }
+
+    private readonly string ContainerId = $"chart-container-{Guid.NewGuid():N}";
+   
+    private ChartContent? _renderedChartContent;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Го исцртуваме дијаграмот само ако содржината е нова.
+        // OnAfterRenderAsync може да се повика повеќе пати, но ние го повикуваме JS interop
+        // само кога ChartContent објектот е различен од претходно исцртаниот.
+         if (ChartContent != null && (firstRender || ChartContent != _renderedChartContent))
+        {
+            
+            _renderedChartContent = ChartContent;
+            var renderer = ChartRenderingService.GetRenderer(ChartContent.Library);
+            await renderer.RenderAsync(ContainerId, ChartContent);
+            Logger.LogInformation("Chart '{ChartType}' rendered in container '{ContainerId}'.", ChartContent.ChartType, ContainerId);
+        }
+    }
+}

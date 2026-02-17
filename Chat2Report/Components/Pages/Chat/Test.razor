@@ -1,0 +1,131 @@
+﻿@page "/Test"
+@inject IJSRuntime JSRuntime
+@implements IAsyncDisposable
+
+<h1>Тест за динамичен HTML</h1>
+
+<div class="alert alert-info">
+    Следново копче е генерирано од обичен C# стринг, но неговиот клик ќе повика C# метода!
+</div>
+
+<div id="dynamic-content-container">
+    @((MarkupString)dynamicHtmlFromLlm)
+</div>
+
+@code {
+    // 1. HTML-от што би го добиле од LLM
+    private string dynamicHtmlFromLlm = @"
+        <button type-=""button"" class=""btn btn-primary""
+                onclick=""blazorInterop.invokeCSharp({
+                    methodName: 'ShowAlert',
+                    parameters: ['Здраво од динамичен HTML! Оваа порака е дефинирана во HTML-от.']
+                })"">
+            Кликни за Алерт
+        </button>
+
+        <button type-=""button"" class=""btn btn-success ms-2""
+                onclick=""blazorInterop.invokeCSharp({
+                    methodName: 'AddNumbersAndShowAlert',
+                    parameters: [5, 12]
+                })"">
+            Собери 5 и 12
+        </button>
+    ";
+
+    private DotNetObjectReference<Test> dotNetObjectReference;
+
+    // 2. Поставување на врската со JavaScript откако компонентата ќе се исцрта
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            dotNetObjectReference = DotNetObjectReference.Create(this);
+            await JSRuntime.InvokeVoidAsync("blazorInterop.setDotNetHelper", dotNetObjectReference);
+        }
+    }
+
+    [JSInvokable]
+    public async Task InvokeMethodFromJs(string methodName, string parametersJson)
+    {
+        try
+        {
+            var methodInfo = this.GetType().GetMethod(methodName,
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.IgnoreCase);
+
+            if (methodInfo == null)
+            {
+                Console.WriteLine($"Грешка: Методата '{methodName}' не е пронајдена.");
+                return;
+            }
+
+            var targetMethodParameters = methodInfo.GetParameters();
+
+            using var jsonDoc = System.Text.Json.JsonDocument.Parse(parametersJson);
+            var jsonParameters = jsonDoc.RootElement.EnumerateArray().ToList();
+
+            if (targetMethodParameters.Length != jsonParameters.Count)
+            {
+                Console.WriteLine($"Грешка: Бројот на параметри не се совпаѓа за методата '{methodName}'. Очекувани: {targetMethodParameters.Length}, Добиени: {jsonParameters.Count}");
+                return;
+            }
+
+            var finalParameters = new object[targetMethodParameters.Length];
+
+            // Итерираме низ секој параметар и го конвертираме во точниот тип
+            for (int i = 0; i < targetMethodParameters.Length; i++)
+            {
+                var targetParam = targetMethodParameters[i];
+                var jsonElement = jsonParameters[i];
+
+                // Го земаме суровиот JSON текст на елементот
+                string rawJson = jsonElement.GetRawText();
+
+                // Го користиме JsonSerializer за да го десеријализираме суровиот JSON
+                // во конкретниот тип што го бара методата
+                finalParameters[i] = System.Text.Json.JsonSerializer.Deserialize(
+                    rawJson,
+                    targetParam.ParameterType,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+                );
+            }
+
+            var result = methodInfo.Invoke(this, finalParameters);
+
+            if (result is Task task)
+            {
+                await task;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Грешка при повикување на метода преку reflection: {ex.Message}");
+            await JSRuntime.InvokeVoidAsync("alert", $"Грешка при извршување на акцијата: {ex.InnerException?.Message ?? ex.Message}");
+        }
+    }
+
+    // --- 4. МЕТОДИ ШТО LLM-ОТ МОЖЕ ДА ГИ ПОВИКА ---
+    // Овие се вашите "алатки" или "API" за LLM-от.
+
+    public async Task ShowAlert(string message)
+    {
+        await JSRuntime.InvokeVoidAsync("alert", message);
+    }
+
+    public async Task AddNumbersAndShowAlert(long num1, long num2)
+    {
+        long sum = num1 + num2;
+        string message = $"Збирот на {num1} и {num2} е {sum}.";
+        await ShowAlert(message);
+    }
+
+    // 5. Чистење на референцата за да се избегнат memory leaks
+    public async ValueTask DisposeAsync()
+    {
+        if (dotNetObjectReference != null)
+        {
+            dotNetObjectReference.Dispose();
+        }
+    }
+}

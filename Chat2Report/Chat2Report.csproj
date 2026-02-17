@@ -1,0 +1,79 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>05686db0-85a4-436c-bd8f-c96b8afd4089</UserSecretsId>
+   
+  </PropertyGroup>
+
+
+  <ItemGroup>
+    <Content Include="Prompts\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <Content Remove="Docs\config-v3.json" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <Content Include="appsettings.json.BCK" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ClosedXML" Version="0.105.0" />
+    <PackageReference Include="Cloud.Unum.USearch" Version="2.19.3" />
+    <PackageReference Include="Google_GenerativeAI.Microsoft" Version="3.0.0" />
+    <PackageReference Include="Handlebars.Net" Version="2.1.6" />
+    <PackageReference Include="Jsonata.Net.Native" Version="2.8.1" />
+    <PackageReference Include="Markdig" Version="0.41.3" />
+    <PackageReference Include="Microsoft.AutoGen.Contracts" Version="0.4.0-dev.3" />
+    <PackageReference Include="Microsoft.AutoGen.Core" Version="0.4.0-dev.3" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.1" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.4" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.3" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="9.7.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.AzureAIInference" Version="9.7.1-preview.1.25365.4" />
+    <PackageReference Include="Microsoft.Extensions.AI.Ollama" Version="9.7.0-preview.1.25356.2" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="9.4.0-preview.1.25207.5" />
+    <PackageReference Include="Microsoft.Extensions.VectorData.Abstractions" Version="9.0.0-preview.1.25161.1" />
+    <PackageReference Include="Microsoft.SemanticKernel.Core" Version="1.37.0" />
+    <PackageReference Include="MudBlazor" Version="8.12.0" />
+    <PackageReference Include="PdfPig" Version="0.1.9" />
+    <PackageReference Include="SmartFormat.NET" Version="3.6.0" />
+    <PackageReference Include="Spectre.Console" Version="0.51.1" />
+    <PackageReference Include="System.DirectoryServices.AccountManagement" Version="9.0.9" />
+    <PackageReference Include="System.Linq.Async" Version="6.0.1" />
+    <PackageReference Include="System.Linq.Dynamic.Core" Version="1.6.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Docs\UserQueryAnalisePrompt - V4.md">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </None>
+    <None Update="SampleDB\northwind.db">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Data\history\" />
+    <Folder Include="VectorStore\data\" />
+    <Folder Include="wwwroot\js\" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Chat2Report.SourceGen\Chat2Report.SourceGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+	  <AdditionalFiles Include="appsettings.json" />
+	  <AdditionalFiles Include="appsettings.Development.json" />
+  
+  </ItemGroup>
+  <ItemGroup>
+    <Content Update="Data">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

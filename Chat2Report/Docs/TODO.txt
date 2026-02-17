@@ -1,0 +1,15 @@
+﻿More NLP, ask user about intent(about doubful columns), enrichment of user query, involve dictionries
+Fix deparments based on short id like: IT, ST
+Tool/routing from response
+Automatic removing of the keys
+OutputKey to be JSONElement???
+Chat.razor 
+DynamicHtml request waiting for user input
+HIL answer as JSONElement not as hardcoded parms
+History
+Memory Preferecnces by client
+MCP
+A2GUI
+SQL Examples (Patterns Prompt)
+SQL Errors -> previous solutions
+Memory Agents 

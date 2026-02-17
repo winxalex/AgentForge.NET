@@ -1,0 +1,142 @@
+@using Microsoft.Extensions.AI
+@using Chat2Report.Models
+@using Chat2Report.Services
+@using Microsoft.JSInterop
+@using System.Linq
+@using Chat2Report.Components.Pages.Chat
+
+
+@inject IExcelService ExcelService
+@inject IJSRuntime JSRuntime
+@inject ILogger<ChatMessageItem> Logger
+
+<div class="message-item-container @Message.Role.ToString().ToLowerInvariant()-message">
+    @if (Message.Role == ChatRole.Assistant)
+    {
+        <div class="assistant-message-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM9.5 16.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm5 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm2.5-5.5H7v-2h10v2z"></path></svg>
+        </div>
+    }
+    <div class="message-item-content">
+        <div class="message-item">
+            @foreach (var content in Message.Contents)
+            {
+                @switch (content)
+                {
+                    case TextContent textContent:
+                        <div @key="@content" class="text-content">
+                            @textContent.Text
+                        </div>
+                        break;
+    
+                    case TableContent tableContent:
+                        <div @key="@content">
+                            @if (tableContent.Rows.Any())
+                            {
+                                var headers = tableContent.Rows.First().Keys.ToList();
+        
+                                <div class="table-content">
+                                    <button class="btn btn-success btn-sm mb-2" @onclick="() => ExportToExcel(tableContent)">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-file-earmark-excel-fill" viewBox="0 0 16 16">
+                                            <path d="M9.293 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4.707A1 1 0 0 0 13.707 4L10 .293A1 1 0 0 0 9.293 0M9.5 3.5v-3l3 3h-3zM5.884 6.68a.5.5 0 1 0-.768.64L7.349 10l-2.233 2.68a.5.5 0 0 0 .768.64L8 10.781l2.116 2.54a.5.5 0 0 0 .768-.64L8.651 10l2.233-2.68a.5.5 0 0 0-.768-.64L8 9.219l-2.116-2.54z"/>
+                                        </svg> Export to Excel
+                                    </button>
+                                    <table class="table table-striped table-hover table-bordered mt-2">
+                                        <thead>
+                                            <tr>
+                                                @foreach (var header in headers)
+                                                {
+                                                    <th>@header</th>
+                                                }
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var row in tableContent.Rows)
+                                            {
+                                                <tr>
+                                                    @foreach (var header in headers)
+                                                    {
+                                                        <td>@row[header]</td>
+                                                    }
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="text-content">
+                                    <p><i>Прашалникот е успешно изврешен. Нема податоци во база.</i></p>
+                                </div>
+                            }
+                        </div>
+                        break;
+    
+                    case ErrorContent errorContent:
+                        <div @key="@content" class="error-content mt-2">@errorContent.Message</div>
+                        break;
+    
+                    case TextReasoningContent reasoningContent:
+                        <details @key="@content" class="mt-2">
+                            <summary>Размислување...</summary>
+                            <pre class="reasoning-content">@reasoningContent.Text</pre>
+                        </details>
+                        break;
+    
+                    case DynamicHtmlContent htmlContent:
+                        <div @key="@content" class="html-content">
+                            @((MarkupString)htmlContent.Html)
+                        </div>
+                        break;
+
+                    case ChartContent chartContent:
+                        Logger.LogInformation("Rendering ChartContent. Library: {Library}, Type: {ChartType}", chartContent.Library, chartContent.ChartType);
+                        
+                        <ChartRenderer @key="@chartContent.GetHashCode()" ChartContent="chartContent" />
+
+                        break;
+    
+                    default:
+                        <div @key="@content">Unsupported message content type: @content.GetType().Name</div>
+                        break;
+                }
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public required ChatMessage Message { get; set; }
+
+    [Parameter]
+    public bool InProgress { get; set; }
+
+    private async Task ExportToExcel(TableContent tableContent)
+    {
+        if (tableContent?.Rows == null || !tableContent.Rows.Any())
+        {
+            return;
+        }
+
+        var dataToExport = tableContent.Rows.Select(row =>
+        {
+            var expando = new System.Dynamic.ExpandoObject() as IDictionary<string, object>;
+            foreach (var kvp in row)
+            {
+                expando[kvp.Key] = kvp.Value;
+            }
+            return (dynamic)expando;
+        }).ToList();
+
+        var workbook = ExcelService.GenerateExcelReport(dataToExport, "Report");
+
+        using var stream = new MemoryStream();
+        workbook.SaveAs(stream);
+        var content = stream.ToArray();
+        var base64Content = Convert.ToBase64String(content);
+
+        await JSRuntime.InvokeVoidAsync("downloadFile", "report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", base64Content);
+    }
+}

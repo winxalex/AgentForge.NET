@@ -1,0 +1,627 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Debug",
+      "Microsoft.AspNetCore": "Warning",
+      "Microsoft.EntityFrameworkCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "DataStoreSettings": { // Example if your data store needs config
+    "ConnectionString": "Data Source=DISQL2012;Initial Catalog=HelpDesk;Trusted_Connection=True;TrustServerCertificate=true"
+
+  },
+  "VectorStoreSettings": { // Example if your vector store needs config
+    "ConnectionString": "./VectorStore/data/help_desk_datastore.db",
+    "IndexSettings": {
+      "IndexPersistencePath": "./VectorStore/data", // Or relative/absolute path
+      "VectorDimension": 768, // Example dimension
+      "MetricKind": "Cos", // Or "L2sq", "IP", etc.
+      "Quantization": "Float32", // Or "Int8", "Float16"
+      "Connectivity": 16,
+      "ExpansionAdd": 128,
+      "ExpansionSearch": 64
+    }
+  },
+  "DomainVectorSearchStepOptions": {
+    "EmbeddingKey": "embedding",
+    "DomainSearchTopK": 10,
+    "DomainSearchScoreThreshold": 0.75
+  },
+  "ValueMatcherOptions": {
+    "EmbeddingClient": {
+      "Type": "ollama",
+      "ModelId": "hf.co/mykor/paraphrase-multilingual-mpnet-base-v2.gguf:latest",
+      "Endpoint": "http://localhost:11434",
+      "UseEmbedding": true
+    },
+    "GoodValueMatchThreshold": 0.36 // Lower is better for cosine distance
+  },
+  "AgentsConfiguration": {
+
+    "Agents": {
+      "QueryValidationAgent": {
+        "TopicId": "validate query",
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.LoadDomainsStep, Chat2Report"
+        },
+        "UseStreaming": true,
+        "Description": "Validates the user query to ensure it is a read-only (SELECT-like) question and not general conversation or a data modification request.",
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          }
+        ],
+    
+        "System": "You are a security and intent analysis expert. Your task is to analyze a user's query in Macedonian and determine if it is a safe, read-only request for information related to a service desk system, or if it is an attempt to modify data (insert, update, delete) or engage in general, off-topic conversation.",
+        "Prompt": "file:Prompts/QueryValidationPrompt.md",
+        "MessageToRules": [
+          {
+            "Condition": "{{{is_valid}}}",
+            "Receivers": [ "UserEntityExtractionAgent/default" ]
+          },
+          {
+            "Condition": "{{#unless is_valid}}true{{else}}false{{/unless}}",
+            "Transform": {
+              "Expression": "{'response': reason}"
+            }
+            
+          }
+        ]
+       
+      },
+      "UserEntityExtractionAgent": {
+        "Description": "Extracts person names from the user query.",
+        "UseStreaming": false,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          }
+        ],
+        "System": "You are an expert in Named Entity Recognition (NER). Your task is to identify and extract all person names written in Macedonian language (first names, last names, or full names what every is posible) from the given text.",
+        "Prompt": "file:Prompts/UserEntityExtractionPrompt.md",
+        "ResponseMapping": {
+          "Type": "Chat2Report.Models.ExtractedPersonsResponse, Chat2Report",
+          "StateKey": "userExtractionResult"
+        },
+        "MessageToRules": [
+          {
+            "Condition": "{{#if user_entities_to_resolve}}false{{else}}true{{/if}}",
+            "Transform": {
+              "ServiceType": "Chat2Report.Agents.WorkflowSteps.ExtractUserEntitiesStep, Chat2Report"
+            },
+            "Receivers": [ "ADResolutionAgent/default" ]
+          },
+          {
+            "Condition": "{{#if user_entities_to_resolve}}true{{else}}false{{/if}}",
+            "Transform": { "ServiceType": "Chat2Report.Agents.WorkflowSteps.ExtractUserEntitiesStep, Chat2Report" },
+            "Receivers": [ "DomainSearchAgent/default" ]
+          }
+        ]
+      },
+      "ADResolutionAgent": {
+        "Description": "Resolves user names against Active Directory.",
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.ADLookupStep, Chat2Report"
+        },
+        "MessageToRules": [
+          {
+            "Condition": "{{#if unknow_user}}true{{else}}false{{/if}}",
+            "Transform": {
+              "Expression": "{\"response\": \"Не е пронајден корисник за корисничкото име '{{unknow_user}}'.\"}"
+            }
+          },
+          {
+            "Condition": "{{#if ambiguous_user_mappings}}true{{else}}false{{/if}}",
+            "Receivers": [ "HumanInTheLoopAgent/default" ]
+          },
+          {
+            "Condition": "{{#unless ambiguous_user_mappings}}{{#if (gt user_entities_to_resolve.Count 0)}}true{{else}}false{{/if}}{{/unless}}",
+            "Receivers": [ "ADResolutionAgent/default" ]
+          },
+          {
+            "Condition": "{{#unless ambiguous_user_mappings}}{{#if (eq user_entities_to_resolve.Count 0)}}true{{else}}false{{/if}}{{/unless}}",
+            "Receivers": [ "DomainSearchAgent/default" ]
+          }
+        ]
+      },
+      "ResumeAfterChoiceAgent": {
+        "TopicId": "resume after choice",
+        "Description": "Resumes the workflow after a user makes a choice in a HITL step.",
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.ResolveAmbiguityStep, Chat2Report"
+        },
+        "MessageToRules": [
+          {
+            "Condition": "{{#if (gt user_entities_to_resolve.Count 0)}}true{{else}}false{{/if}}",
+            "Receivers": [ "ADResolutionAgent/default" ]
+          },
+          {
+            "Condition": "{{#if (eq user_entities_to_resolve.Count 0)}}true{{else}}false{{/if}}",
+            "Receivers": [ "DomainSearchAgent/default" ]
+          }
+        ]
+      },
+      "HumanInTheLoopAgent": {
+        "Description": "Handles ambiguous user mappings by asking the user to select the correct one.",
+        "UseStreaming": true,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          }
+        ],
+        "System": "You are a helpful assistant that creates UI components for user selection.",
+        "Prompt": "file:Prompts/HITL-UserSelectionPrompt.md",
+        "ResponseMapping": {
+          "Type": "Chat2Report.Models.DynamicHtmlContent, Chat2Report",
+          "StateKey": "dynamic_html_content"
+        },
+        "MessageToRules": [],
+        "Display": {
+          "Text": {
+            "Template": "{{{dynamic_html_content.Html}}}"
+          }
+        }
+      },
+      "DomainSearchAgent": {
+        "TopicId": "resolve domain",
+        "Description": "Generates an embedding for a user query and then performs a vector search to find candidate domains.",
+        "Clients": [
+          {
+            "Type": "ollama",
+            "ModelId": "hf.co/mykor/paraphrase-multilingual-mpnet-base-v2.gguf:latest",
+            "Endpoint": "http://localhost:11434",
+            "UseEmbedding": true,
+            "Log": false
+          }
+        ],
+        "System": "You are an embedding and search service.",
+        "Prompt": "What domain is defined with user query: {{{user_query}}}",
+        "MessageToRules": [
+          {
+
+            "Transform": {
+              "ServiceType": "Chat2Report.Agents.WorkflowSteps.DomainVectorSearchStep, Chat2Report"
+            },
+            "Receivers": [ "DomainReRanker/default" ]
+          }
+        ]
+       
+      },
+      "DomainReRanker": {
+        "System": "You are an expert system that analyzes a user's query and a list of candidate domains. Your task is to determine which domains are most relevant to the user's query and return them in a ranked order.",
+        "Description": "Receives candidate domains and a user query, then uses an LLM to re-rank them.",
+        "Timeouts": {
+          "RequestTimeoutMinutes": 3,
+          "StreamingInactivityTimeoutMinutes": 6
+        },
+        "UseStreaming": true,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-2.5-flash",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "AzureAI",
+            "ModelId": "deepseek/DeepSeek-R1-0528",
+            "ApiKey": "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",
+            "Endpoint": "https://models.github.ai/inference"
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "OpenRouter",
+            "ModelId": "moonshotai/kimi-k2:free",
+            "Endpoint": "https://openrouter.ai/api/v1",
+            "ApiKey": "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",
+            "Log": true
+          },
+          {
+            "Type": "ollama",
+            "ModelId": "deepseek-r1:8b",
+            "Endpoint": "http://localhost:11434",
+            "Log": true
+          }
+        ],
+        "Prompt": "file:Prompts/DomainReRankerPrompt.md",
+        "MessageToRules": [
+          {
+            "Condition": "{{#if ranked_domains}}false{{else}}true{{/if}}",
+            "Transform": {
+              "Expression": "{\"response\": \"Не е пронајдена област што одговара на корисничкиот прашалник.\"}"
+            }
+           
+          },
+          {
+            "Transform": {
+              "ServiceType": "Chat2Report.Agents.WorkflowSteps.ReRankedDomainTablesViewsStep, Chat2Report"
+            },
+            "Receivers": [ "TableRelevanceAgent/default" ]
+          }
+        ]
+      },
+     
+      "TableRelevanceAgent": {
+        "Description": "Receives resolved domains and a user query, then uses an LLM to find relevant tables.",
+        "UseStreaming": true,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-2.5-flash",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "OpenRouter",
+            "ModelId": "moonshotai/kimi-k2:free",
+            "Endpoint": "https://openrouter.ai/api/v1",
+            "ApiKey": "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",
+            "Log": true
+          },
+          {
+            "Type": "ollama",
+            "ModelId": "deepseek-r1:8b",
+            "Endpoint": "http://localhost:11434",
+            "Log": true
+          }
+        ],
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.TableRelevanceStep, Chat2Report"
+        },
+        "System": "You are an expert database analyst. Your task is to identify which database tables are relevant for answering a user's question based on the provided database schema.",
+        "Prompt": "file:Prompts/TableRelevancePrompt.md",
+
+        "MessageToRules": [
+          {
+            "Receivers": [ "ViewRelevanceAgent/default" ]
+          }
+        ]
+       
+      },
+      "ViewRelevanceAgent": {
+        "Description": "",
+        "UseStreaming": true,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-2.5-flash",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "OpenRouter",
+            "ModelId": "moonshotai/kimi-k2:free",
+            "Endpoint": "https://openrouter.ai/api/v1",
+            "ApiKey": "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",
+            "Log": true
+          },
+          {
+            "Type": "ollama",
+            "ModelId": "deepseek-r1:8b",
+            "Endpoint": "http://localhost:11434",
+            "Log": true
+          }
+        ],
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.ViewRelevanceStep, Chat2Report"
+        },
+        "System": "You are an expert database analyst. Your task is to identify which database **views** from a given list are most relevant to a user's query, given a set of already-identified relevant tables.",
+        "Prompt": "file:Prompts/ViewRelevancePrompt.md",
+        "MessageToRules": [
+          {
+
+            "Receivers": [ "FunctionRelevanceAgent/default" ]
+          }
+        ]
+      },
+     
+      "FunctionRelevanceAgent": {
+        "Description": "",
+        "UseStreaming": true,
+        "Clients": [
+          
+          {
+            "Type": "google",
+            "ModelId": "gemini-2.5-flash",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "OpenRouter",
+            "ModelId": "moonshotai/kimi-k2:free",
+            "Endpoint": "https://openrouter.ai/api/v1",
+            "ApiKey": "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",
+            "Log": true
+          },
+          {
+            "Type": "ollama",
+            "ModelId": "deepseek-r1:8b",
+            "Endpoint": "http://localhost:11434",
+            "Log": true
+          }
+        ],
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.FunctionRelevanceStep, Chat2Report"
+        },
+        "System": "You are an expert database analyst. Your task is to identify which database functions are additionally necessary to answer the user's query, given the already identified relevant tables and views.",
+        "Prompt": "file:Prompts/FunctionRelevancePrompt.md",
+        "MessageToRules": [
+          {
+            "Receivers": [ "OntologyAgent/default" ]
+          }
+        ]
+        
+      },
+      "OntologyAgent": {
+        "Description": "Performs ontological analysis of the user query to extract structured attributes based on the relevant schema.",
+        "UseStreaming": true,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-2.5-flash",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "OpenRouter",
+            "ModelId": "moonshotai/kimi-k2:free",
+            "Endpoint": "https://openrouter.ai/api/v1",
+            "ApiKey": "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",
+            "Log": true
+          },
+          {
+            "Type": "ollama",
+            "ModelId": "deepseek-r1:8b",
+            "Endpoint": "http://localhost:11434",
+            "Log": true
+          }
+        ],
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.OntologyStep, Chat2Report"
+        },
+        "System": "You are an expert semantic parser trained to transform vague or natural language queries in Macedonian into precise and structured data based on a predefined domain ontology.",
+        "Prompt": "file:Prompts/Ontology-V7.md",
+        "ResponseMapping": {
+          "Type": "Chat2Report.Models.UserQueryAnalysis, Chat2Report",
+          "StateKey": "userAnalyses"
+        },
+        "MessageToRules": [
+          {
+            "Transform": {
+              "ServiceType": "Chat2Report.Agents.WorkflowSteps.ExtractAnalysisStep, Chat2Report"
+            }
+            ,
+            "Receivers": [ "SqlGenerationAgent/default" ]
+          }
+        ]
+       
+      },
+      "SqlGenerationAgent": {
+        "Description": "Generates a T-SQL query based on the provided context and user query.",
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.SQLContextBuilderStep, Chat2Report"
+        },
+        "UseStreaming": false,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-2.5-flash", //gemini-2.5-flash-lite
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "google",
+            "ModelId": "gemini-1.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "OpenRouter",
+            "ModelId": "moonshotai/kimi-k2:free",
+            "Endpoint": "https://openrouter.ai/api/v1",
+            "ApiKey": "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",
+            "Log": true
+          },
+          {
+            "Type": "ollama",
+            "ModelId": "deepseek-r1:8b",
+            "Endpoint": "http://localhost:11434",
+            "Log": true
+          }
+        ],
+        "System": "You are a world-class expert in writing MSSQL (Microsoft SQL Server) queries. Your task is to generate a single, syntactically correct, and efficient Transact-SQL (T-SQL) query based on the provided database schema analysis and the user's request.",
+        "Prompt": "file:Prompts/SqlGenerationPrompt.md",
+       
+        "MessageToRules": [
+          {
+            "Transform": {
+              "ServiceType": "Chat2Report.Agents.WorkflowSteps.SqlPreExecuteCleanStep, Chat2Report"
+            },
+            "Receivers": [ "SqlExecutionAgent/default" ]
+          }
+        ],
+        "Display": {
+          "Text": {
+            "Template": "```sql\n{{{sql}}}\n```"
+          }
+        }
+      },
+      "SqlExecutionAgent": {
+        "Prompt": "{{{generated_sql}}}",
+        "Description": "Executes the generated SQL. If it fails, it routes to the SqlFixingAgent.",
+        "Clients": [
+          {
+            "Type": "sql",
+            "ModelId": "Local SQL Executor",
+            "ThrowOnError": false
+          }
+        ],
+        "MessageToRules": [
+          {
+            "Condition": "{{#if error}}true{{else}}false{{/if}}",
+            "Receivers": [ "SqlFixingAgent/default" ]
+          },
+          {
+            "Condition": "{{#unless error}}true{{else}}false{{/unless}}",
+
+          }
+        ],
+        "Display": {
+          "Table": {
+            "Enabled": true
+          }
+        }
+      },
+      "SqlFixingAgent": {
+        "Description": "Receives an invalid SQL query and an error message, and attempts to fix it.",
+        "UseStreaming": true,
+        "Clients": [
+          {
+            "Type": "google",
+            "ModelId": "gemini-2.5-flash-latest",
+            "ApiKey": "AIzaSyBbiMfEkjCvRedLA6Y5fCRi4wtzHRxYze8"
+          },
+          {
+            "Type": "ZAI",
+            "ModelId": "glm-4.5-flash",
+            "Endpoint": "https://api.z.ai/api/paas/v4",
+            "ApiKey": "b8c4ab4d92b94d51b407242ef0166dc8.7zDYuAyIgAUKjTvi",
+            "Log": true
+          },
+          {
+            "Type": "OpenRouter",
+            "ModelId": "moonshotai/kimi-k2:free",
+            "Endpoint": "https://openrouter.ai/api/v1",
+            "ApiKey": "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",
+            "Log": true
+          },
+          {
+            "Type": "ollama",
+            "ModelId": "gpt-oss:latest",
+            "Endpoint": "http://localhost:11434",
+            "Log": true
+          }
+        ],
+        "System": "You are an expert in MSSQL (Microsoft SQL Server) query debugging and optimization. Given an invalid T-SQL query, the corresponding error message, and the original context, your task is to generate a corrected and valid MSSQL query.",
+        "Transform": {
+          "ServiceType": "Chat2Report.Agents.WorkflowSteps.SqlFixStep, Chat2Report"
+        },
+        "Prompt": "file:Prompts/SqlFixingPrompt.md",
+        "MessageToRules": [
+          {
+            "Transform": {
+              "ServiceType": "Chat2Report.Agents.WorkflowSteps.SqlPreExecuteCleanStep, Chat2Report"
+            },
+            "Receivers": [ "SqlExecutionAgent/default" ]
+          }
+        ],
+        "Display": {
+          "Reasoning": {
+            "Template": "**My fix attempt:** {{reasoning}}"
+          },
+          "Text": {
+            "Template": "```sql\n{{{generated_sql}}}\n```"
+          }
+        }
+      }
+    
+    }
+  },
+  "SchemaProcessingSettings": {
+
+    "Domains": [
+      {
+        "Name": "Helpdesk",
+        "Description": "Тhis domain defines general service desk system, that includes user-submitted support cases, including their status, priority, department, submission date, related communication threads, and time tracked activities(allocation of work hours) addressing each case. Users include all employees (such as programmers, bankers, system engineers) as well as external users."
+      },
+      {
+        "Name": "Products",
+        "Description": "This domain includes product information, specifications, and related data."
+      },
+      {
+        "Name": "Users",
+        "Description": "This domain covers user accounts, permissions, roles, and security-related information."
+      },
+      {
+        "Name": "Test",
+        "Description": "This domain defines testing domain."
+      }
+    ],
+    "SchemasToScan": [ "dbo", "Sifri" ],
+    "TableDescriptionProperty": "MS_Description_EN",
+    "ColumnDescriptionProperty": "MS_Description_EN",
+    "FunctionDescriptionProperty": "MS_Description_EN",
+    "DomainCollectionName": "AllDomains",
+    "TableCollectionName": "AllTableDefinitions",
+    "ColumnCollectionName": "AllColumnDefinitions",
+    "ViewCollectionName": "AllViewDefinitions"
+  }
+}

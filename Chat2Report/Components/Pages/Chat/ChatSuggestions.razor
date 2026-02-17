@@ -1,0 +1,34 @@
+@using Chat2Report.Models
+
+@if (suggestions.Any())
+{
+    <div class="suggestions-container page-width">
+        @foreach (var suggestion in suggestions)
+        {
+            <button class="suggestion-chip" @onclick="() => SelectSuggestion(suggestion)">@suggestion</button>
+        }
+    </div>
+}
+
+@code {
+    [Parameter]
+    public EventCallback<ChatMessage> OnSelected { get; set; }
+
+    private List<string> suggestions = new();
+
+    public void Update(List<ChatMessage> messages)
+    {
+        // Placeholder logic: Add suggestions after an assistant response.
+        // This can be replaced with more sophisticated logic.
+        suggestions.Clear();
+        if (messages.Any(m => m.Role == ChatRole.Assistant))
+        {
+            suggestions.AddRange(new[] { "Кажи ми повеќе.", "Можеш ли да го појасниш тоа?", "Кои се следните чекори?" });
+        }
+        StateHasChanged();
+    }
+
+    public void Clear() => suggestions.Clear();
+
+    private Task SelectSuggestion(string text) => OnSelected.InvokeAsync(new ChatMessage(ChatRole.User, text));
+}

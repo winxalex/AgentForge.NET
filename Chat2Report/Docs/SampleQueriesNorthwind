@@ -1,0 +1,59 @@
+🔎 Basic queries
+
+Find all customers from Germany.
+
+Show me all products that cost more than 50 dollars.
+
+List employees who live in London.
+
+Show all orders placed in 1997.
+
+Find products that are out of stock.
+
+📊 Aggregation queries
+
+Find the top 5 most expensive products.
+
+Show total sales for each customer.
+
+Which employee handled the most orders?
+
+Show the total revenue for each year.
+
+What is the average product price per category?
+
+📈 Analytical / ranking style
+
+Show the top 10 customers by total purchase amount.
+
+Find the best-selling products by quantity.
+
+Which country generated the highest revenue?
+
+Rank employees by total sales.
+
+Show monthly sales trends for 1998.
+
+🔄 Filtering with conditions
+
+Find customers who have not placed any orders.
+
+Show products that were never ordered.
+
+List suppliers from the USA supplying beverages.
+
+Find orders shipped after their required date.
+
+Show customers who placed more than 10 orders.
+
+🧠 More complex / reasoning style
+
+Which customers increased their purchases year over year?
+
+Find the category with the highest average unit price.
+
+Identify seasonal sales patterns by month.
+
+Which employee generated the highest revenue in 1997?
+
+Show customers whose average order value is above the overall average.

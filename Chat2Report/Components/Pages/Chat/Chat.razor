@@ -1,0 +1,908 @@
+﻿@page "/"
+@using System.ComponentModel
+@using Chat2Report.Components.Pages.Chat
+@using Chat2Report.Providers
+@using DocumentFormat.OpenXml.Drawing.Charts
+@using GettingStartedSample
+@using Microsoft.AutoGen.Contracts
+@using Chat2Report.Services
+@using Chat2Report.Extensions
+@using Chat2Report.Models
+@using System.Linq
+@using Chat2Report.Services.Chart
+@using System.Diagnostics
+@using Microsoft.Extensions.Options
+@* @inject IChatClient ChatClient *@
+@inject NavigationManager Nav
+@inject IServiceProvider ServiceProvider
+@inject ITopicTerminationService TopicTerminationService 
+@inject IWorkflowPauseService WorkflowPauseService
+@inject IOptions<ChartingSettings> ChartSettings
+@inject IUIStreamBroker UIStreamBroker
+@inject IChartRenderingService ChartRenderingService
+@inject IJSRuntime JSRuntime
+@inject IConfiguration Configuration
+@inject ILogger<Chat> Logger
+
+
+@implements IAsyncDisposable
+
+<PageTitle>Chat</PageTitle>
+
+<ChatHeader OnNewChat="@ResetConversationAsync" ShowNewChatButton="@(messages.Any() && !isProcessing)" />
+
+<ChatMessageList Messages="@messages" InProgressMessage="@currentResponseMessage">
+    <NoMessagesContent>
+        <div>За да почниш користи ги овие примери</div>
+        <ChatCitation Text="Which customers increased their purchases year over year?" OnClick="HandleCitationClickAsync" />
+        <ChatCitation Text="Find the category with the highest average unit price." OnClick="HandleCitationClickAsync" />
+        <ChatCitation Text="Identify seasonal sales patterns by month." OnClick="HandleCitationClickAsync" />
+        <ChatCitation Text="Which employee generated the highest revenue in 1997?" OnClick="HandleCitationClickAsync" />
+        <ChatCitation Text="Show customers whose average order value is above the overall average." OnClick="HandleCitationClickAsync" />
+     
+
+    </NoMessagesContent>
+</ChatMessageList>
+
+<div class="chat-container">
+    @* <ChatSuggestions OnSelected="@AddUserMessageAsync" @ref="@chatSuggestions" /> *@
+    <ChatInput OnSend="@AddUserMessageAsync" @ref="@chatInput" IsProcessing="isProcessing && !isWaiting" OnStop="HandleStopAsync" />
+
+   
+</div>
+
+@code {
+
+
+    private readonly List<ChatMessage> messages = new();
+    private CancellationTokenSource? currentResponseCancellation;
+    private ChatMessage? currentResponseMessage;
+    private ChatInput? chatInput;
+    private string? currentWorkflowInstanceId; // To track the active conversation
+    private bool isProcessing;
+    private bool isWaiting;
+    private ChatSuggestions? chatSuggestions;
+
+    protected override void OnInitialized()
+    {
+        // messages.Add(new(ChatRole.System, SystemPrompt));
+        UIStreamBroker.StreamMessageReceived += HandleStreamUpdateAsync;
+    }
+
+    private async Task HandleStreamUpdateAsync(StreamPayload payload)
+    {
+        // Check if the update is for the current, active conversation
+        if (payload.WorkflowTopicId == currentWorkflowInstanceId &&
+            currentResponseMessage is not null)
+        {
+            await InvokeAsync(async () =>
+            {
+                if (payload.Contents is null)
+                {
+                    return;
+                }
+
+                foreach (AIContent newContent in payload.Contents)
+                {
+                    switch (newContent)
+                    {
+                        case TextContent newText:
+                            var existingText = currentResponseMessage.Contents.OfType<TextContent>().FirstOrDefault();
+                            if (existingText != null)
+                            {
+                                existingText.Text += newText.Text;
+                            }
+                            else
+                            {
+                                // This is the first text chunk for this message.
+                                // Insert at the beginning of the list to ensure the main text response
+                                // always appears first in the UI, above reasoning or tables.
+                                currentResponseMessage.Contents.Insert(0, newText);
+                            }
+                            break;
+
+                        case TextReasoningContent newReasoning:
+                            var existingReasoning = currentResponseMessage.Contents.OfType<TextReasoningContent>().FirstOrDefault();
+                            if (existingReasoning != null)
+                            {
+                                existingReasoning.Text += string.IsNullOrWhiteSpace(existingReasoning.Text)
+                                    ? newReasoning.Text
+                                    : $"{Environment.NewLine}---{Environment.NewLine}{newReasoning.Text}";
+                            }
+                            else
+                            {
+                                currentResponseMessage.Contents.Add(newReasoning);
+                            }
+                            break;
+
+                        case TableContent newTable:
+                            // Remove any existing table and add the new one.
+                            currentResponseMessage.Contents.RemoveAll(c => c is TableContent);
+                            currentResponseMessage.Contents.Add(newTable);
+                            break;
+
+                        case DynamicHtmlContent newChoices:
+
+                            //не го трга прогресирањето
+                            isProcessing = false;
+
+                            isWaiting = true;
+                            StateHasChanged(); // Immediately update UI to show processing state
+
+                            // This is for HITL. We replace any existing choices.
+                            currentResponseMessage.Contents.RemoveAll(c => c is DynamicHtmlContent);
+                            currentResponseMessage.Contents.Add(newChoices);
+
+                            break;
+
+                        case ChartContent chartContent:
+                            Logger.LogInformation("Chat.razor: Received ChartContent stream payload. Chart Type: {ChartType}, Library: {Library}", chartContent.ChartType, chartContent.Library);
+                            
+                            currentResponseMessage.Contents.Add(chartContent);
+                            break;
+
+                        default:
+                            currentResponseMessage.Contents.Add(newContent);
+                            break;
+                    }
+                }
+
+                StateHasChanged();
+            });
+        }
+    }
+
+    @* protected override void OnInitialized()
+    {
+
+    } *@
+
+    private async Task AddUserMessageAsync(ChatMessage userMessage)
+    {
+        if (isProcessing) return;
+
+        CancelAnyCurrentResponse();
+
+        // Add the user message to the conversation
+        messages.Add(userMessage);
+        chatSuggestions?.Clear();
+        await chatInput!.FocusAsync();
+
+        var workflowInstanceId = Guid.NewGuid().ToString(); // Unique ID for this conversation instance
+        currentWorkflowInstanceId = workflowInstanceId; // Store the instance ID
+        isProcessing = true;
+        StateHasChanged(); // Immediately update UI to show processing state
+
+        try
+        {
+            // Get IAgentRuntime from service provider
+            var agentRuntime = ServiceProvider.GetService<IAgentRuntime>();
+            if (agentRuntime != null)
+            {
+                currentResponseCancellation = new CancellationTokenSource();
+                currentResponseMessage = new(ChatRole.Assistant, string.Empty); // Initialize for streaming
+
+                TaskCompletionSource<Dictionary<string, object>>? taskCompletionSource = await TopicTerminationService.GetOrCreateAsync(new TopicId("workflow-completion", workflowInstanceId));
+
+
+                 var initialState = new WorkflowState
+                    {
+                        WorkflowTopicId = workflowInstanceId, //This is the GUID, used as Source for subsequent messages
+                        Data = new Dictionary<string, object>
+                        {
+                        //--- Основни информации за барањето ---
+                            ["user_query"] = userMessage.Text
+
+                        }
+                    };  
+
+
+
+                
+
+
+                await agentRuntime.PublishMessageAsync(
+                    initialState, // The state contains the WorkflowTopicId (GUID)
+                  
+                    new TopicId("validate query", workflowInstanceId), // Initial message to a generic topic, source is default
+                   
+                    null, null, currentResponseCancellation.Token);
+
+
+
+                var result = await taskCompletionSource.Task;
+
+                // The agent is now responsible for sending its display content via the UI stream.
+                // We just need to handle the final state message.
+                ShowResponse(result);
+
+
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent("Процесот е прекинат."));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        catch (Exception e)
+        {
+
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent(e?.Message ?? e?.InnerException?.Message));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        finally
+        {
+            currentResponseMessage = null;
+            isProcessing = false;
+            StateHasChanged();
+        }
+        
+        chatSuggestions?.Update(messages);
+    }
+
+
+    private async Task HandleTestTestDiagrams(string text)
+    {
+
+        ChatMessage userMessage = new(ChatRole.User, text);
+        if (isProcessing) return;
+
+        CancelAnyCurrentResponse();
+
+        // Add the user message to the conversation
+        messages.Add(userMessage);
+        chatSuggestions?.Clear();
+        await chatInput!.FocusAsync();
+
+        var workflowInstanceId = Guid.NewGuid().ToString(); // Unique ID for this conversation instance
+        currentWorkflowInstanceId = workflowInstanceId; // Store the instance ID
+        isProcessing = true;
+        StateHasChanged(); // Immediately update UI to show processing state
+
+        try
+        {
+            // Get IAgentRuntime from service provider
+            var agentRuntime = ServiceProvider.GetService<IAgentRuntime>();
+            if (agentRuntime != null)
+            {
+                currentResponseCancellation = new CancellationTokenSource();
+                currentResponseMessage = new(ChatRole.Assistant, string.Empty); // Initialize for streaming
+
+                TaskCompletionSource<Dictionary<string, object>>? taskCompletionSource = await TopicTerminationService.GetOrCreateAsync(new TopicId("workflow-completion", workflowInstanceId));
+
+
+
+
+
+                var columnData = new List<object>
+{
+    new Dictionary<string, object>
+    {
+        { "name", "dbo._ActivityCases.[UsedTime]" },
+        { "type", "datetime" },
+        { "description", "The column defines the total time spent performing the activity for the given case, stored as hours and minutes (e.g., 07:23 = 7 hours and 23 minutes) in a datetime field where only the time portion is relevant.\nTypical Usage:` CAST(SUM(DATEPART(HOUR, UsedTime) * 60 + DATEPART(MINUTE, UsedTime)) AS DECIMAL(10,2)) / 60 AS TotalHours`" }
+    },
+    new Dictionary<string, object>
+    {
+        { "name", "dbo._ActivityCases.[Activity]" },
+        { "type", "nvarchar(MAX)" },
+        { "description", "The column defines the detailed description of the activity performed" }
+    },
+    new Dictionary<string, object>
+    {
+        { "name", "dbo._ActivityCases.[Username]" },
+        { "type", "varchar(50)" },
+        { "description", "The column defines username of the owner of the activity" }
+    },
+    new Dictionary<string, object>
+    {
+        { "name", "dbo._ActivityCases.[DateTime]" },
+        { "type", "datetime" },
+        { "description", "The column defines the actual date to which the activity relates, regardless of when it was entered into the system. For example, an activity performed last week but recorded today will have the date of last week." }
+    },
+    new Dictionary<string, object>
+    {
+        { "name", "dbo._ActivityCases.[CaseNo]" },
+        { "type", "int" },
+        { "description", "The column defines the identification number of the ticket or case in forumThread, to which the activity is related. IMPORTANT:This is not application ID." }
+    },
+    new Dictionary<string, object>
+    {
+        { "name", "dbo.AplikacijaSlucai.AppID" },
+        { "type", "varchar(20)" },
+        { "description", "The column defines unique application identifier." }
+    },
+    new Dictionary<string, object>
+    {
+        { "name", "dbo.AplikacijaSlucai.AppNaziv" },
+        { "type", "nvarchar(500)" },
+        { "description", "The column defines application name." }
+    },
+    new Dictionary<string, object>
+    {
+        { "name", "dbo.AplikacijaSlucai.CaseNo" },
+        { "type", "int(4)" },
+        { "description", "The column defines case/ticket identification number." }
+    }
+};
+
+
+
+                IReadOnlyList<IReadOnlyDictionary<string, object?>> sampleData = new List<IReadOnlyDictionary<string, object?>>
+                {
+                    new Dictionary<string, object?> { { "CaseNo", 209134 }, { "Activity", "Регистар на обврзници" }, { "Username", "SandraS" }, { "DateTime", "2014-07-15T22:00:00.000Z" }, { "UsedTime", "2014-07-17T21:00:00.000Z" }, { "AppID", "179" }, { "AppNaziv", "Известување за краткорочни побарувања и обврски од комерцијално работење со нерезиденти (КИПО)" } },
+                    new Dictionary<string, object?> { { "CaseNo", 209134 }, { "Activity", "Промени во форма за контрола и затварање" }, { "Username", "SandraS" }, { "DateTime", "2014-07-03T22:00:00.000Z" }, { "UsedTime", "2014-07-17T12:00:00.000Z" }, { "AppID", "179" }, { "AppNaziv", "Известување за краткорочни побарувања и обврски од комерцијално работење со нерезиденти (КИПО)" } },
+                    new Dictionary<string, object?> { { "CaseNo", 209134 }, { "Activity", "Бришење на образец" }, { "Username", "SandraS" }, { "DateTime", "2014-07-08T22:00:00.000Z" }, { "UsedTime", "2014-07-17T13:00:00.000Z" }, { "AppID", "179" }, { "AppNaziv", "Известување за краткорочни побарувања и обврски од комерцијално работење со нерезиденти (КИПО)" } },
+                    new Dictionary<string, object?> { { "CaseNo", 209134 }, { "Activity", "Кроекции, тестирање" }, { "Username", "SandraS" }, { "DateTime", "2014-07-22T22:00:00.000Z" }, { "UsedTime", "2014-07-25T15:00:00.000Z" }, { "AppID", "179" }, { "AppNaziv", "Известување за краткорочни побарувања и обврски од комерцијално работење со нерезиденти (КИПО)" } },
+                    new Dictionary<string, object?> { { "CaseNo", 209134 }, { "Activity", "Тестирање, корекции" }, { "Username", "SandraS" }, { "DateTime", "2014-07-28T22:00:00.000Z" }, { "UsedTime", "2014-07-31T16:00:00.000Z" }, { "AppID", "179" }, { "AppNaziv", "Известување за краткорочни побарувања и обврски од комерцијално работење со нерезиденти (КИПО)" } }
+                };
+
+
+                var supported_charts = ChartSettings.Value.SupportedCharts;
+
+                var initialState = new WorkflowState
+                    {
+                        WorkflowTopicId = workflowInstanceId, // This is the GUID, used as Source for subsequent messages
+                        Data = new Dictionary<string, object>
+                        {
+                            ["user_query"] = userMessage.Text,
+                            ["relevant_domains"] = new List<object>{ new Dictionary<string, object>
+                            {
+                                { "name", "Helpdesk" },
+                                 { "description", "Тhis domain defines general service desk system, that includes user-submitted support cases, including their status, priority, department, submission date, related communication threads, and time tracked activities(allocation of work hours) addressing each case. Users include all employees (such as programmers, bankers, system engineers) as well as external users." }
+                             }},
+                            ["relevant_columns"] = columnData,
+                            ["sql_execution_table_result"] = sampleData,
+
+
+                        @* ["supported_charts"] =
+                                 System.Text.Json.JsonSerializer.Serialize(supported_charts) *@
+                             ["supported_charts"] = supported_charts
+                         }
+                };
+
+
+                await agentRuntime.PublishMessageAsync(
+                    initialState, // The state contains the WorkflowTopicId (GUID)
+                    //new TopicId("validate query", workflowInstanceId), //Initial message to a generic topic, source is default
+                    //new TopicId("chart_selection", workflowInstanceId), // Initial message to a generic topic, source is default
+                    new TopicId("validate query", workflowInstanceId), // Initial message to a generic topic, source is default
+                    // new TopicId("streaming_test", workflowInstanceId), // Initial message to a generic topic, source is default
+                    //new TopicId("calculator_topic", workflowInstanceId), // Initial message to a generic topic, source is default
+                    //new TopicId("validate query", TopicId.DefaultSource), // Initial message to a generic topic, source is default
+                    null, null, currentResponseCancellation.Token);
+
+
+
+                var result = await taskCompletionSource.Task;
+
+                // The agent is now responsible for sending its display content via the UI stream.
+                // We just need to handle the final state message.
+                ShowResponse(result);
+
+
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent("Процесот е прекинат."));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        catch (Exception e)
+        {
+
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent(e?.Message ?? e?.InnerException?.Message));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        finally
+        {
+            currentResponseMessage = null;
+            isProcessing = false;
+            StateHasChanged();
+        }
+       
+        chatSuggestions?.Update(messages);
+    
+    }
+
+    private async Task HandleTestTransformStateJSONSerClickAsync(string text)
+    {
+         
+        ChatMessage userMessage = new(ChatRole.User, text);
+
+        if (isProcessing) return;
+
+        CancelAnyCurrentResponse();
+
+        // Add the user message to the conversation
+        messages.Add(userMessage);
+        chatSuggestions?.Clear();
+        await chatInput!.FocusAsync();
+
+        var workflowInstanceId = Guid.NewGuid().ToString(); // Unique ID for this conversation instance
+        currentWorkflowInstanceId = workflowInstanceId; // Store the instance ID
+        isProcessing = true;
+        StateHasChanged(); // Immediately update UI to show processing state
+
+          TopicId initialTopic;
+                WorkflowState initialState;
+
+               
+                    initialTopic = new TopicId("serialization_test", workflowInstanceId);
+
+                    // Create a sample ChartContent object to test serialization
+                    var chartToTest = new ChartContent
+                    {
+                      
+                        Options =  "pie\n    \"A\": 10\n    \"B\": 20",
+                        Rows = new List<IReadOnlyDictionary<string, object?>>
+                        {
+                            new Dictionary<string, object?> { { "Activity", "Design" }, { "Hours", 8 } },
+                            new Dictionary<string, object?> { { "Activity", "Development" }, { "Hours", 40 } },
+                            new Dictionary<string, object?> { { "Activity", "Testing" }, { "Hours", 16 } }
+                        }
+                    };
+
+                    chartToTest.ChartType = "pie";
+                    chartToTest.Library = "Mermaid";
+                    chartToTest.JsRenderFunction = "ChartUtils.renderMermaidChart";
+
+
+                    initialState = new WorkflowState
+                    {
+                        WorkflowTopicId = workflowInstanceId,
+                        Data = new Dictionary<string, object>
+                        {
+                            ["user_query"] = userMessage.Text,
+                            ["chart_to_test"] = chartToTest
+                        }
+                    };
+             
+
+        try
+        {
+            // Get IAgentRuntime from service provider
+            var agentRuntime = ServiceProvider.GetService<IAgentRuntime>();
+            if (agentRuntime != null)
+            {
+                currentResponseCancellation = new CancellationTokenSource();
+                currentResponseMessage = new(ChatRole.Assistant, string.Empty); // Initialize for streaming
+
+                TaskCompletionSource<Dictionary<string, object>>? taskCompletionSource = await TopicTerminationService.GetOrCreateAsync(new TopicId("workflow-completion", workflowInstanceId));
+
+
+             
+                await agentRuntime.PublishMessageAsync(
+                    initialState, // The state contains the WorkflowTopicId (GUID)
+                    //new TopicId("validate query", workflowInstanceId), //Initial message to a generic topic, source is default
+                    //new TopicId("chart_selection", workflowInstanceId), // Initial message to a generic topic, source is default
+                    new TopicId("serialization_test", workflowInstanceId), // Initial message to a generic topic, source is default
+                    // new TopicId("streaming_test", workflowInstanceId), // Initial message to a generic topic, source is default
+                    //new TopicId("calculator_topic", workflowInstanceId), // Initial message to a generic topic, source is default
+                    //new TopicId("validate query", TopicId.DefaultSource), // Initial message to a generic topic, source is default
+                    null, null, currentResponseCancellation.Token);
+
+
+
+                var result = await taskCompletionSource.Task;
+
+                // The agent is now responsible for sending its display content via the UI stream.
+                // We just need to handle the final state message.
+                ShowResponse(result);
+
+
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent("Процесот е прекинат."));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        catch (Exception e)
+        {
+
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent(e?.Message ?? e?.InnerException?.Message));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        finally
+        {
+            currentResponseMessage = null;
+            isProcessing = false;
+            StateHasChanged();
+        }
+      
+        chatSuggestions?.Update(messages);
+
+
+
+        
+    }
+
+
+    public async Task HandleChoiceClickAsync(string parcialName, string selectedFullName)
+    {
+        //if (isProcessing || currentTopicId is null) return;
+        if (currentWorkflowInstanceId is null) return;
+
+        // 1. Add a user-facing message to show what was selected.
+        var userFriendlyChoice = $"За '{parcialName}' го избравте корисникот: {selectedFullName}.";
+        messages.Add(new(ChatRole.User, userFriendlyChoice));
+
+        // 2. Remove the old choice UI from the last assistant message       
+        currentResponseMessage?.Contents.RemoveAll(c => c is DynamicHtmlContent);
+
+        isProcessing = true;
+        isWaiting = false;
+        StateHasChanged();
+
+
+
+        try
+        {
+            //take waitTopicTermination Service from ServiceProvider
+
+            var agentRuntime = ServiceProvider.GetRequiredService<IAgentRuntime>();
+            currentResponseCancellation = new CancellationTokenSource();
+            //currentResponseMessage = new(ChatRole.Assistant, string.Empty); // Prepare for new response
+
+            // The WaitForChoiceStep is awaiting this very same TaskCompletionSource.
+            // This effectively "un-pauses" the workflow right where it stopped.
+            TopicTerminationService.TryComplete(
+                new TopicId("user-choice-resume", currentWorkflowInstanceId),
+                new Dictionary<string, object>
+                {
+                    ["user_choice_parcial_name"] = parcialName,
+                    ["user_choice_selected_full_name"] = selectedFullName
+                });
+
+
+
+
+
+
+
+        }
+        catch (Exception ex)
+        {
+            messages.Add(new(ChatRole.Assistant, new List<AIContent> { new ErrorContent($"Грешка при продолжување: {ex.Message}")}));
+        }
+    }
+
+    public async Task HandleChartRequest()
+    {
+        if (isProcessing) return;
+
+        // 1. Најди ја пораката што го содржи копчето и контекстот.
+        var messageWithButton = messages.LastOrDefault(m => m.Contents.Any(c => c is DynamicHtmlContent));
+        if (messageWithButton is null || messageWithButton.AdditionalProperties?.TryGetValue("chart_context", out var contextObj) != true)
+        {
+            await JSRuntime.InvokeVoidAsync("alert", "Грешка: Контекстот за генерирање на дијаграм не е пронајден.");
+            return;
+        }
+
+        // 2. Вчитај го контекстот
+        if (contextObj is not Dictionary<string, object> context)
+        {
+            await JSRuntime.InvokeVoidAsync("alert", "Грешка: Контекстот за дијаграм е во невалиден формат.");
+            return;
+        }
+
+        // 3. Отстрани го копчето од UI
+        messageWithButton.Contents.RemoveAll(c => c is DynamicHtmlContent);
+
+        // 4. Стартувај го новиот работен тек за генерирање на дијаграм
+        CancelAnyCurrentResponse();
+
+        var workflowInstanceId = Guid.NewGuid().ToString();
+        currentWorkflowInstanceId = workflowInstanceId;
+        isProcessing = true;
+        StateHasChanged(); // Update UI to show we are processing
+
+        try
+        {
+            var agentRuntime = ServiceProvider.GetRequiredService<IAgentRuntime>();
+            currentResponseCancellation = new CancellationTokenSource();
+            currentResponseMessage = new(ChatRole.Assistant, string.Empty); // New message for the chart
+
+            var taskCompletionSource = await TopicTerminationService.GetOrCreateAsync(new TopicId("workflow-completion", workflowInstanceId));
+
+            // Add supported_charts to the context
+            context["supported_charts"] = ChartSettings.Value.SupportedCharts;
+
+            var initialState = new WorkflowState
+            {
+                WorkflowTopicId = workflowInstanceId,
+                Data = context
+            };
+
+            await agentRuntime.PublishMessageAsync(
+                initialState,
+                new TopicId("generate_chart", workflowInstanceId), // The topic for the new workflow
+                null, null, currentResponseCancellation.Token);
+
+            var result = await taskCompletionSource.Task;
+
+           
+            ShowResponse(result);
+        }
+        catch (TaskCanceledException)
+        {
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent("Процесот е прекинат."));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        catch (Exception e)
+        {
+
+            if (currentResponseMessage != null)
+            {
+                currentResponseMessage.Contents.Add(new ErrorContent(e?.Message ?? e?.InnerException?.Message));
+
+                messages.Add(currentResponseMessage);
+            }
+        }
+        finally
+        {
+            currentResponseMessage = null;
+            isProcessing = false;
+            StateHasChanged();
+        }
+    }
+
+
+    private void ShowResponse(Dictionary<string,object> result)
+    {
+        if (currentResponseMessage is null) return;
+
+        // Користи AdditionalProperties за да го зачуваш контекстот без да го менуваш ChatMessage моделот.
+        if (result.TryGetValue("chart_context", out var context))
+        {
+            currentResponseMessage.AdditionalProperties ??= new();
+            currentResponseMessage.AdditionalProperties["chart_context"] = context;
+            result.Remove("chart_context"); // Исчисти го за да не се прикажува како суров JSON
+        }
+
+        if (result.TryGetValue("response", out var responseObj) &&
+            responseObj is (
+                string or
+                int or long or short or byte or
+                double or float or decimal
+            ))
+        {
+            currentResponseMessage.Contents.Add(new TextContent(responseObj.ToString()));
+        }
+        else
+        {
+
+            currentResponseMessage.Contents.Add(new TextContent(result is not null ? result.ToJSON() : "Задачата е завршена."));
+
+        }
+
+
+
+        messages.Add(currentResponseMessage);
+
+    }
+
+    private async Task HandleStopAsync()
+    {
+
+        CancelAnyCurrentResponse();
+
+        isProcessing = false;
+        chatSuggestions?.Update(messages);
+
+        await InvokeAsync(StateHasChanged); // Ensure UI updates immediately
+    }
+
+    private void CancelAnyCurrentResponse()
+    {
+
+
+        // This cancels the CancellationToken passed to agents, for cooperative cancellation.
+        if (currentResponseCancellation != null && !currentResponseCancellation.IsCancellationRequested)
+            currentResponseCancellation?.Cancel();
+
+        // This is the crucial part: it signals the workflow to terminate,
+        // which unblocks the `await taskCompletionSource.Task`.
+        if (currentWorkflowInstanceId is not null)
+        {   // Cancel the specific completion topic for this workflow instance
+            TopicTerminationService?.Cancel(new TopicId("workflow-completion", currentWorkflowInstanceId));
+        }
+
+        currentResponseMessage = null;
+        currentWorkflowInstanceId = null; // Also clear the topic ID on cancel
+    }
+
+    private async Task HandleCitationClickAsync(string text)
+    {
+        if (chatInput != null)
+        {
+            await chatInput.SetMessageTextAndFocusAsync(text);
+        }
+    }
+
+    private async Task ResetConversationAsync()
+    {
+        CancelAnyCurrentResponse();
+        messages.Clear();
+        //messages.Add(new(ChatRole.System, SystemPrompt));
+        chatSuggestions?.Clear();
+        await chatInput!.FocusAsync();
+    }
+
+
+    private DotNetObjectReference<Chat> dotNetObjectReference;
+
+    // 2. Поставување на врската со JavaScript откако компонентата ќе се исцрта
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            dotNetObjectReference = DotNetObjectReference.Create(this);
+            await JSRuntime.InvokeVoidAsync("blazorInterop.setDotNetHelper", dotNetObjectReference);
+        }
+    }
+
+    [JSInvokable]
+    public async Task InvokeMethodFromJs(string methodName, string parametersJson)
+    {
+        try
+        {
+            var methodInfo = this.GetType().GetMethod(methodName,
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.IgnoreCase);
+
+            if (methodInfo == null)
+            {
+                Console.WriteLine($"Грешка: Методата '{methodName}' не е пронајдена.");
+                return;
+            }
+
+            var targetMethodParameters = methodInfo.GetParameters();
+
+            using var jsonDoc = System.Text.Json.JsonDocument.Parse(parametersJson);
+            var jsonParameters = jsonDoc.RootElement.EnumerateArray().ToList();
+
+            if (targetMethodParameters.Length != jsonParameters.Count)
+            {
+                Console.WriteLine($"Грешка: Бројот на параметри не се совпаѓа за методата '{methodName}'. Очекувани: {targetMethodParameters.Length}, Добиени: {jsonParameters.Count}");
+                return;
+            }
+
+            var finalParameters = new object[targetMethodParameters.Length];
+
+            // Итерираме низ секој параметар и го конвертираме во точниот тип
+            for (int i = 0; i < targetMethodParameters.Length; i++)
+            {
+                var targetParam = targetMethodParameters[i];
+                var jsonElement = jsonParameters[i];
+
+                // Го земаме суровиот JSON текст на елементот
+                string rawJson = jsonElement.GetRawText();
+
+                // Го користиме JsonSerializer за да го десеријализираме суровиот JSON
+                // во конкретниот тип што го бара методата
+                finalParameters[i] = System.Text.Json.JsonSerializer.Deserialize(
+                    rawJson,
+                    targetParam.ParameterType,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+                );
+            }
+
+            var result = methodInfo.Invoke(this, finalParameters);
+
+            if (result is Task task)
+            {
+                await task;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Грешка при повикување на метода преку reflection: {ex.Message}");
+            await JSRuntime.InvokeVoidAsync("alert", $"Грешка при извршување на акцијата: {ex.InnerException?.Message ?? ex.Message}");
+        }
+    }
+
+
+    //МОVE TO TESTs
+    @* Секција за тестирање на Mermaid дијаграми *@
+    // <div class="mt-3 border-top pt-3">
+    //     <h5>Mermaid Debugging</h5>
+    //     <p>Кликни на копчето за да се обидеш да исцрташ хардкодиран Mermaid дијаграм. Провери ја конзолата (F12) за грешки.</p>
+    //     <button class="btn btn-warning" @onclick="TestRenderMermaid">Тестирај Mermaid рендерирање</button>
+    //     <div id="mermaid-test-container" class="mt-2 border p-2 bg-light" style="min-height: 100px; resize: vertical; overflow: auto;">
+    //         <!-- Тест дијаграмот ќе се исцрта тука -->
+    //     </div>
+    // </div>
+//     private async Task TestRenderMermaid()
+//     {
+//         // Хардкодирана дефиниција на Mermaid дијаграм за тестирање
+//         /*       var testChartDefinition = @"
+//         flowchart TD
+//     A[Start Test] -->|Click| B(Render)
+//     B --> C{Success?}
+//         C -->|Yes| D[Chart Visible]
+//     C -->|No| E[Check Console Error]";
+//     */
+
+// string testChartDefinition = @"---
+// config:
+//   themeVariables:
+//     xyChart:
+//           titleColor: ""#ff0000""
+//           plotColorPalette: ""#ff0000, #00ff00""
+// ---
+// xychart
+//     title ""Sales Revenue""
+//     x-axis [jan, feb, mar, apr, may, jun, jul, aug, sep, oct, nov, dec]
+//     y-axis ""Revenue (in $)"" 4000 --> 11000
+//     bar [5000, 6000, 7500, 8200, 9500, 10500, 11000, 10200, 9200, 8500, 7000, 6000]
+//     line [5000, 6000, 7500, 8200, 9500, 10500, 11000, 10200, 9200, 8500, 7000, 6000]";
+
+
+
+//         string testChartDefinition2 = @"
+//         gantt
+//         title A Gantt Diagram
+//         dateFormat YYYY - MM - DD
+//     section Section
+//         A task          :a1, 2014 - 01 - 01, 30d
+//         Another task    :after a1, 20d
+//     section Another
+//         Task in Another: 2014 - 01 - 12, 12d
+//         another task    :24d";
+//         //await jsRuntime.InvokeVoidAsync(chartContent.JsRenderFunction, containerId, test);
+
+//         try
+//         {
+//             // Директен повик на JavaScript функцијата од chart-utils.js
+//             await JSRuntime.InvokeVoidAsync("ChartUtils.renderMermaidChart", "mermaid-test-container", testChartDefinition2);
+//         }
+//         catch (Exception ex)
+//         {
+//             // Ако повикот кон JS не успее, прикажи порака
+//             await JSRuntime.InvokeVoidAsync("alert", $"Грешка при повик на renderMermaidChart: {ex.Message}");
+//         }
+//     }
+  
+
+    public async ValueTask DisposeAsync()
+    {
+        UIStreamBroker.StreamMessageReceived -= HandleStreamUpdateAsync;
+        currentResponseCancellation?.Cancel();
+        currentResponseCancellation?.Dispose();
+
+        
+         dotNetObjectReference?.Dispose();
+        
+    }
+}
