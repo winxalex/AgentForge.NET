@@ -1,1 +1,1 @@
-JSON configured AI Agentic workflow with NL2SQL example
+JSON configured AI Agentic workflow with NL2SQL example in .NET C#
