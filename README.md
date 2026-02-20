@@ -158,58 +158,58 @@ app.Run();
 
 ---
 
-## Quick Start Guide (MK)
+## Quick Start Guide
 
-Овој водич објаснува како да ги конфигурирате основните сервиси и да стартувате работен тек во проектот.
+This guide explains how to configure basic services and start a workflow in the project.
 
-### 1. Додавање и Конфигурација на Сервиси
+### 1. Adding and Configuring Services
 
-За да ги користите `ITemplateEngine`, `ITopicTerminationService` и `IWorkflowPauseService`, прво треба да ги регистрирате во вашиот Dependency Injection (DI) контејнер, што најчесто се прави во `Program.cs`.
+To use `ITemplateEngine`, `ITopicTerminationService`, and `IWorkflowPauseService`, you first need to register them in your Dependency Injection (DI) container, which is most often done in `Program.cs`.
 
-**Регистрација во `Program.cs`:**
+**Registration in `Program.cs`:**
 
 ```csharp
-// Во Program.cs, во делот каде што ги конфигурирате сервисите:
+// In Program.cs, in the section where you configure services:
 
-// 1. Регистрирај го стандардниот Handlebars template engine.
+// 1. Register the default Handlebars template engine.
 builder.Services.AddSingleton<ITemplateEngine, HandlebarsTemplateEngine>();
 
-// 2. Регистрирај ги стандардните сервиси за пауза и терминирање на работниот тек.
+// 2. Register the default services for pausing and terminating the workflow.
 builder.Services.AddSingleton<IWorkflowPauseService, DefaultWorkflowPauseService>();
 builder.Services.AddSingleton<ITopicTerminationService, DefaultTopicTerminationService>();
 
-// ... останати регистрации на сервиси
+// ... other service registrations
 ```
 
-### 2. Како се користи `ITemplateEngine`
+### 2. How to use `ITemplateEngine`
 
-`ITemplateEngine` служи за динамично генерирање на содржина (најчесто промпт) од предефиниран темплејт (шаблон).
+`ITemplateEngine` is used for dynamic content generation (most often a prompt) from a predefined template.
 
-**Чекор 1: Креирајте темплејт фајл**
+**Step 1: Create a template file**
 
-Направете нов фајл во `Chat2Report/Prompts/`, на пример `mojot_prompt.md`.
+Create a new file in `Chat2Report/Prompts/`, for example `my_prompt.md`.
 
-_Содржина на `Chat2Report/Prompts/mojot_prompt.md`_:
+_Content of `Chat2Report/Prompts/my_prompt.md`_:
 
 ```markdown
-Ти си асистент кој треба да го анализира следново барање од корисникот: "{{user_query}}".
+You are an assistant that needs to analyze the following user request: "{{user_query}}".
 ```
 
-### 3. Објаснување: Како се Стартува Работен Тек
+### 3. Explanation: How to Start a Workflow
 
-Следниот код покажува како се иницира работен тек.
+The following code shows how a workflow is initiated.
 
 ```csharp
-// 1. Го зема IAgentRuntime од DI контејнерот.
+// 1. Gets IAgentRuntime from the DI container.
 var agentRuntime = ServiceProvider.GetService<IAgentRuntime>();
 
 if (agentRuntime != null)
 {
-    // 2. Користи TopicTerminationService за да креира "сигнал за чекање".
+    // 2. Uses TopicTerminationService to create a "wait signal".
     TaskCompletionSource<Dictionary<string, object>>? taskCompletionSource =
         await TopicTerminationService.GetOrCreateAsync(new TopicId("workflow-completion", workflowInstanceId));
 
-    // 3. Ја креира почетната состојба (initial state) на работниот тек.
+    // 3. Creates the initial state of the workflow.
     var initialState = new WorkflowState
     {
         WorkflowTopicId = workflowInstanceId,
@@ -219,16 +219,16 @@ if (agentRuntime != null)
         }
     };
 
-    // 4. Го стартува работниот тек со објавување порака на "topic" (`validate query`).
+    // 4. Starts the workflow by publishing a message to the "topic" (`validate query`).
     await agentRuntime.PublishMessageAsync(
         initialState,
         new TopicId("validate query", workflowInstanceId),
         null, null, currentResponseCancellation.Token);
 
-    // 5. Чека да заврши работниот тек.
+    // 5. Waits for the workflow to finish.
     var result = await taskCompletionSource.Task;
 
-    // 6. Прикажи го финалниот резултат.
+    // 6. Display the final result.
 
 }
 ```
