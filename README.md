@@ -1,8 +1,29 @@
-# QuickStart
+# 🤖 A Dynamic AI Agent Framework in .NET
+
+## 👋 Introduction
+
+This project was born out of an exploration of building dynamic, AI-powered agentic workflows using .NET, at a time when Microsoft's open-source AI landscape was rapidly evolving with libraries like Semantic Kernel and AutoGen.
+
+## ❓ Why .NET?
+
+While Python dominates the AI landscape, this project takes a different path, leveraging the strengths of C# and the .NET ecosystem. The goal was to combine the robustness of a statically-typed language with the flexibility typically associated with dynamic languages like Python.
+
+Here's how we achieve that:
+
+- 🔌 **Extensibility with Dependency Injection (DI):** We harness the power of .NET's Inversion of Control (IoC) and Dependency Injection to make every component interchangeable. You can easily plug in your own template engine, state transformers, or database services.
+- ✨ **Dynamic by Design:** To avoid the rigidity of endless DTOs and models, we mimic Python's dynamism by using `Dictionary<string, object>` and `JsonElement` for agent state management. This allows for flexible, on-the-fly data manipulation.
+- 📄 **JSON-Defined Workflows:** Workflows, agents, and their steps are defined declaratively in JSON. This makes it easy to create, modify, and deploy complex agentic systems without recompiling the code.
+- 🔀 **Powerful State Transformation:** We use JSONata for querying and transforming the agent's state, enabling complex logic and data manipulation within the workflow itself.
+
+While the initial idea was to use pure C# for state evaluation, the reality is that Large Language Models (LLMs) primarily communicate via JSON. This framework embraces that reality, providing a powerful and flexible way to build LLM-powered applications in .NET.
+
+[![Watch the video](https://img.youtube.com/vi/ufEC0-CeExI/0.jpg)](https://youtu.be/ufEC0-CeExI)
+
+# 🚀 QuickStart
 
 This guide provides a basic overview of how to configure and run agents and workflows using the JSON-defined framework.
 
-## Configuration (`appsettings.json`)
+## ⚙️ Configuration (`appsettings.json`)
 
 The core of the agent framework is configured through `appsettings.json`. This includes defining LLM providers, workflow steps, and the agents themselves.
 
@@ -115,7 +136,7 @@ This example shows an agent `QueryValidationAgent` within `DefaultReportFlow`.
 - **`Config`**: Provides specific settings for this step instance, like which LLM client to use (`gemini-pro`) and the prompt files.
 - **`Routes`**: Defines the next agent to call based on the result of the steps.
 
-## Initialization (`Program.cs`)
+## 💡 Initialization (`Program.cs`)
 
 The C# code in `Program.cs` loads the configuration and brings the agents to life.
 
@@ -232,3 +253,15 @@ if (agentRuntime != null)
 
 }
 ```
+
+##### 🏗️ TODO
+
+- MCP support (prompts and tools can be accessed from there with just mcp://url in the config)
+- A2UI (read off nasty Blazor)
+- Create Angular Node editor
+- Agent memory (maybe even separate project)
+- Load workflows from files to be reused
+
+##### 🤝 Contributions
+
+You are welcome to contribute!
